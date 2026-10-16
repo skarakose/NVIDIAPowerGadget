@@ -3,7 +3,8 @@
 macOS menu bar monitor and fan-curve controller for NVIDIA GPUs supported by
 the `NVRM`/NullMoth driver path.
 
-The menu bar item shows the GPU temperature beside the fan RPM column. Click
+The menu bar item shows the GPU temperature beside the fan RPM column,
+plus any extra metrics you enable. Click
 it to open the fan curve popup. Use “+ Add point” to create temperature/speed
 points; the curve is saved as JSON in 
 `/Library/Application Support/NVIDIAPowerGadget/curve.json` 
@@ -60,8 +61,28 @@ Logs: `/var/log/nvidiapowergadget-fanctl.log`. Removal:
 sudo launchctl bootout system/com.nvidiapowergadget.fanctl 2>/dev/null || true
 sudo rm /Library/LaunchDaemons/com.nvidiapowergadget.fanctl.plist
 sudo rm -rf /usr/local/libexec/nvidiapowergadget \
-  "/Library/Application Support/NVIDIAPowerGadget"
+  "/Library/Application Support/NVIDIAPowerGadget" \
+  /var/log/nvidiapowergadget-fanctl.log
+sudo rm -rf /Applications/NVIDIAPowerGadget.app
 ```
+
+Also remove the app from **System Settings → General → Login Items** if
+added there. Note: deleting the `Application Support` folder also deletes
+your fan curve (`curve.json`) and monitor selection (`display.json`).
+
+## Monitor
+
+Click the ⚙ button in the fan curve popup to open the Monitor settings.
+Each checkbox adds a readout to the menu bar item:
+
+- VRAM usage (%), VRAM usage (MB)
+- Graphic engine (%), Framebuffer (%), NVENC (%), NVDEC (%)
+- NVENC / NVDEC (show when active): only shown while the engine is in use
+- GPU clock (MHz), Memory clock (MHz)
+
+The selection is saved as JSON in
+`/Library/Application Support/NVIDIAPowerGadget/display.json`
+and loaded on the next launch. All boxes are off by default.
 
 ## Caution
 - The NVIDIAPowerGadget app has only been tested on a dual-fan Gigabyte RTX 3060 Ti

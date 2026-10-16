@@ -15,11 +15,21 @@ private struct StoredFanCurve: Codable {
 extension FanCurvePoint: Codable {}
 
 private final class StatusItemView: NSView {
+    static let baseWidth: CGFloat = 108
+    private static let extraFont = NSFont.systemFont(ofSize: 10, weight: .medium)
     var temperature = 0
     var fanRPMs: [Int] = []
+    var extras: [String] = []
+
+    var fittingWidth: CGFloat {
+        guard !extras.isEmpty else { return Self.baseWidth }
+        let text = extras.joined(separator: "   ")
+        let width = (text as NSString).size(withAttributes: [.font: Self.extraFont]).width
+        return Self.baseWidth + 6 + ceil(width)
+    }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 108, height: 22)
+        NSSize(width: fittingWidth, height: 22)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -57,6 +67,19 @@ private final class StatusItemView: NSView {
             x: 76,
             y: (bounds.height - unitSize.height) / 2
         ))
+
+        if !extras.isEmpty {
+            let text = extras.joined(separator: "   ")
+            let extra = NSAttributedString(
+                string: text,
+                attributes: [.font: Self.extraFont, .foregroundColor: NSColor.labelColor]
+            )
+            let size = extra.size()
+            extra.draw(at: NSPoint(
+                x: Self.baseWidth + 6,
+                y: (bounds.height - size.height) / 2
+            ))
+        }
     }
 
     private func drawVerticallyCentered(_ text: NSAttributedString, in rect: NSRect) {
@@ -73,6 +96,7 @@ private final class CurveViewController: NSViewController, NSTextFieldDelegate {
     var onPointEdited: ((Int, Int, Int) -> Void)?
     var onAddPoint: (() -> Void)?
     var onRemovePoint: ((Int) -> Void)?
+    var onSettingsTapped: (() -> Void)?
     var points: [FanCurvePoint] = []
     private var sliders: [NSSlider] = []
     private var temperatureFields: [NSTextField] = []
@@ -91,6 +115,13 @@ private final class CurveViewController: NSViewController, NSTextFieldDelegate {
         title.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         title.frame = NSRect(x: 20, y: 270, width: 280, height: 20)
         view.addSubview(title)
+
+        let settings = NSButton(title: "⚙", target: self, action: #selector(openSettings))
+        settings.bezelStyle = .smallSquare
+        settings.isBordered = false
+        settings.font = NSFont.systemFont(ofSize: 19)
+        settings.frame = NSRect(x: 278, y: 263, width: 34, height: 30)
+        view.addSubview(settings)
 
         let temperatureHeader = NSTextField(labelWithString: "Temp °C")
         temperatureHeader.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
@@ -218,6 +249,10 @@ private final class CurveViewController: NSViewController, NSTextFieldDelegate {
         onPointEdited?(field.tag, points[field.tag].temperature, points[field.tag].percent)
     }
 
+    @objc private func openSettings() {
+        onSettingsTapped?()
+    }
+
     @objc private func addPoint() {
         onAddPoint?()
     }
@@ -227,18 +262,133 @@ private final class CurveViewController: NSViewController, NSTextFieldDelegate {
     }
 }
 
+private struct MonitorMetrics {
+    var vramUsedMB: Int?
+    var vramTotalMB: Int?
+    var utilGE: Int?
+    var utilFB: Int?
+    var utilNVENC: Int?
+    var utilNVDEC: Int?
+    var gpuClockMHz: Int?
+    var memClockMHz: Int?
+}
+
+private struct DisplayOptions: Codable {
+    var vramPercent = false
+    var vramMB = false
+    var graphicEngine = false
+    var framebuffer = false
+    var nvenc = false
+    var nvdec = false
+    var nvencActiveOnly = false
+    var nvdecActiveOnly = false
+    var gpuClock = false
+    var memClock = false
+
+    enum CodingKeys: String, CodingKey {
+        case vramPercent, vramMB, graphicEngine, framebuffer
+        case nvenc, nvdec, nvencActiveOnly, nvdecActiveOnly
+        case gpuClock, memClock
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        vramPercent = try c.decodeIfPresent(Bool.self, forKey: .vramPercent) ?? false
+        vramMB = try c.decodeIfPresent(Bool.self, forKey: .vramMB) ?? false
+        graphicEngine = try c.decodeIfPresent(Bool.self, forKey: .graphicEngine) ?? false
+        framebuffer = try c.decodeIfPresent(Bool.self, forKey: .framebuffer) ?? false
+        nvenc = try c.decodeIfPresent(Bool.self, forKey: .nvenc) ?? false
+        nvdec = try c.decodeIfPresent(Bool.self, forKey: .nvdec) ?? false
+        nvencActiveOnly = try c.decodeIfPresent(Bool.self, forKey: .nvencActiveOnly) ?? false
+        nvdecActiveOnly = try c.decodeIfPresent(Bool.self, forKey: .nvdecActiveOnly) ?? false
+        gpuClock = try c.decodeIfPresent(Bool.self, forKey: .gpuClock) ?? false
+        memClock = try c.decodeIfPresent(Bool.self, forKey: .memClock) ?? false
+    }
+}
+
+private final class MonitorSettingsViewController: NSViewController {
+    var options = DisplayOptions()
+    var onBack: (() -> Void)?
+    var onOptionsChanged: ((DisplayOptions) -> Void)?
+
+    private static let items: [(String, WritableKeyPath<DisplayOptions, Bool>)] = [
+        ("VRAM usage (%)", \.vramPercent),
+        ("VRAM usage (MB)", \.vramMB),
+        ("Graphic engine (%)", \.graphicEngine),
+        ("Framebuffer (%)", \.framebuffer),
+        ("NVENC (%)", \.nvenc),
+        ("NVDEC (%)", \.nvdec),
+        ("NVENC (show when active)", \.nvencActiveOnly),
+        ("NVDEC (show when active)", \.nvdecActiveOnly),
+        ("GPU clock (MHz)", \.gpuClock),
+        ("Memory clock (MHz)", \.memClock),
+    ]
+
+    override func loadView() {
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 348))
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        let back = NSButton(title: "‹ Fan Curve", target: self, action: #selector(goBack))
+        back.bezelStyle = .rounded
+        back.tag = -1
+        back.frame = NSRect(x: 12, y: 312, width: 100, height: 24)
+        view.addSubview(back)
+
+        let title = NSTextField(labelWithString: "Monitor")
+        title.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        title.frame = NSRect(x: 120, y: 312, width: 180, height: 22)
+        view.addSubview(title)
+
+        for (index, item) in Self.items.enumerated() {
+            let box = NSButton(checkboxWithTitle: item.0, target: self, action: #selector(toggled(_:)))
+            box.tag = index
+            box.state = options[keyPath: item.1] ? .on : .off
+            box.frame = NSRect(x: 20, y: 282 - index * 27, width: 280, height: 20)
+            view.addSubview(box)
+        }
+    }
+
+    func setOptions(_ options: DisplayOptions) {
+        self.options = options
+        guard isViewLoaded else { return }
+        for case let box as NSButton in view.subviews where box.tag >= 0 {
+            box.state = options[keyPath: Self.items[box.tag].1] ? .on : .off
+        }
+    }
+
+    @objc private func toggled(_ sender: NSButton) {
+        guard sender.tag >= 0, sender.tag < Self.items.count else { return }
+        options[keyPath: Self.items[sender.tag].1] = (sender.state == .on)
+        onOptionsChanged?(options)
+    }
+
+    @objc private func goBack() {
+        onBack?()
+    }
+}
+
 final class NVIDIAStatusBarController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let statusView = StatusItemView()
     private let popover = NSPopover()
     private let curveController = CurveViewController()
+    private let settingsController = MonitorSettingsViewController()
     private var timer: Timer?
     private var points: [FanCurvePoint] = []
+    private var displayOptions = DisplayOptions()
+    private var metrics = MonitorMetrics()
 
     override init() {
-        statusItem = NSStatusBar.system.statusItem(withLength: 108)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         points = loadPoints()
+        displayOptions = loadDisplayOptions()
+        statusItem.length = StatusItemView.baseWidth
         statusItem.button?.addSubview(statusView)
         statusView.frame = statusItem.button?.bounds ?? .zero
         statusView.autoresizingMask = [.width, .height]
@@ -272,6 +422,18 @@ final class NVIDIAStatusBarController: NSObject, NSPopoverDelegate {
             self.savePoints()
             self.curveController.updatePoints(self.points)
         }
+        curveController.onSettingsTapped = { [weak self] in
+            self?.showSettings()
+        }
+        settingsController.onBack = { [weak self] in
+            guard let self else { return }
+            self.popover.contentViewController = self.curveController
+        }
+        settingsController.onOptionsChanged = { [weak self] options in
+            self?.displayOptions = options
+            self?.saveDisplayOptions()
+            self?.refresh()
+        }
         popover.contentViewController = curveController
         popover.behavior = .transient
         popover.delegate = self
@@ -295,6 +457,11 @@ final class NVIDIAStatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func showSettings() {
+        settingsController.setOptions(displayOptions)
+        popover.contentViewController = settingsController
+    }
+
     private func refresh() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var status = nvfan_status_t()
@@ -305,12 +472,71 @@ final class NVIDIAStatusBarController: NSObject, NSPopoverDelegate {
                 let rpm = nvfan_status_fan_rpm(&status, UInt32(index))
                 return rpm > 0 ? Int(rpm) : nil
             }
-            DispatchQueue.main.async {
-                self?.statusView.temperature = Int(status.temperatureC)
-                self?.statusView.fanRPMs = rpms
-                self?.statusView.needsDisplay = true
+
+            var metrics = MonitorMetrics()
+            var ext = nvfan_extended_t()
+            if nvfan_read_extended(&ext) == 0 {
+                if ext.vramUsedMB >= 0 { metrics.vramUsedMB = Int(ext.vramUsedMB) }
+                if ext.vramTotalMB >= 0 { metrics.vramTotalMB = Int(ext.vramTotalMB) }
+                if ext.utilGE >= 0 { metrics.utilGE = Int(ext.utilGE) }
+                if ext.utilFB >= 0 { metrics.utilFB = Int(ext.utilFB) }
+                if ext.utilNVENC >= 0 { metrics.utilNVENC = Int(ext.utilNVENC) }
+                if ext.utilNVDEC >= 0 { metrics.utilNVDEC = Int(ext.utilNVDEC) }
+                if ext.gpuClockMHz >= 0 { metrics.gpuClockMHz = Int(ext.gpuClockMHz) }
+                if ext.memClockMHz >= 0 { metrics.memClockMHz = Int(ext.memClockMHz) }
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.metrics = metrics
+                self.statusView.temperature = Int(status.temperatureC)
+                self.statusView.fanRPMs = rpms
+                self.statusView.extras = self.extraTexts()
+                self.statusView.needsDisplay = true
+                let width = self.statusView.fittingWidth
+                self.statusItem.length = width
+                self.statusView.frame = NSRect(x: 0, y: 0, width: width, height: 22)
             }
         }
+    }
+
+    private func extraTexts() -> [String] {
+        var out: [String] = []
+        if displayOptions.vramPercent,
+           let used = metrics.vramUsedMB,
+           let total = metrics.vramTotalMB, total > 0 {
+            out.append("VRAM \(used * 100 / total)%")
+        }
+        if displayOptions.vramMB, let used = metrics.vramUsedMB {
+            if let total = metrics.vramTotalMB, total > 0 {
+                out.append("\(used)/\(total) MB")
+            } else {
+                out.append("\(used) MB")
+            }
+        }
+        if displayOptions.graphicEngine, let v = metrics.utilGE {
+            out.append("GE \(v)%")
+        }
+        if displayOptions.framebuffer, let v = metrics.utilFB {
+            out.append("FB \(v)%")
+        }
+        if displayOptions.nvencActiveOnly {
+            if let v = metrics.utilNVENC, v > 0 { out.append("NVENC \(v)%") }
+        } else if displayOptions.nvenc, let v = metrics.utilNVENC {
+            out.append("NVENC \(v)%")
+        }
+        if displayOptions.nvdecActiveOnly {
+            if let v = metrics.utilNVDEC, v > 0 { out.append("NVDEC \(v)%") }
+        } else if displayOptions.nvdec, let v = metrics.utilNVDEC {
+            out.append("NVDEC \(v)%")
+        }
+        if displayOptions.gpuClock, let v = metrics.gpuClockMHz {
+            out.append("GPU \(v)MHz")
+        }
+        if displayOptions.memClock, let v = metrics.memClockMHz {
+            out.append("MEM \(v)MHz")
+        }
+        return out
     }
 
     private var configURL: URL {
@@ -338,6 +564,33 @@ final class NVIDIAStatusBarController: NSObject, NSPopoverDelegate {
             try data.write(to: configURL, options: .atomic)
         } catch {
             NSLog("NVIDIA Power Gadget: could not save fan curve: \(error)")
+        }
+    }
+
+    private var displayConfigURL: URL {
+        URL(fileURLWithPath: "/Library/Application Support/NVIDIAPowerGadget/display.json")
+    }
+
+    private func loadDisplayOptions() -> DisplayOptions {
+        do {
+            let data = try Data(contentsOf: displayConfigURL)
+            return try JSONDecoder().decode(DisplayOptions.self, from: data)
+        } catch CocoaError.fileReadNoSuchFile {
+            return DisplayOptions()
+        } catch {
+            NSLog("NVIDIA Power Gadget: could not read display options: \(error)")
+            return DisplayOptions()
+        }
+    }
+
+    private func saveDisplayOptions() {
+        do {
+            let directory = displayConfigURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(displayOptions)
+            try data.write(to: displayConfigURL, options: .atomic)
+        } catch {
+            NSLog("NVIDIA Power Gadget: could not save display options: \(error)")
         }
     }
 }

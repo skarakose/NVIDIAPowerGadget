@@ -893,6 +893,130 @@ static int cmd_auto(void)
     return 0;
 }
 
+/* ── extended monitor (FB / per-engine UTIL / clocks) ─────────────────
+ * Direct RM controls, verified against r610 ctrl2080{fb,perf}.h.
+ * Runs on the session rm_bringup() provides. */
+#define NV2080_CTRL_CMD_FB_GET_INFO_V2                    0x20801303u
+#define NV2080_CTRL_CMD_PERF_GET_GPUMON_UTIL_V2           0x20802096u
+#define NV2080_CTRL_CMD_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES 0x20801037u
+
+#define NV2080_CTRL_FB_INFO_INDEX_TOTAL_RAM_SIZE  0x08u
+#define NV2080_CTRL_FB_INFO_INDEX_HEAP_FREE       0x16u
+#define NV_FB_INFO_UNUSED                         0xFFFFFFFFu
+
+typedef struct { NvU32 index, data; } nv_fb_info_entry_t;
+typedef struct { NvU32 n; nv_fb_info_entry_t e[128]; } nv_fb_info_v2_t;
+
+typedef struct {
+    NvU64 ts;
+    NvU32 gpcKHz, dramKHz, nvdKHz, activeGpcKHz;
+} nv_clk_sample_t;
+#define NV_CLK_PMU_N 250u
+typedef struct {
+    NvU32 tail, seq, head, num, reset, mode;
+    nv_clk_sample_t s[NV_CLK_PMU_N];
+} nv_clk_pmu_t;
+
+typedef struct {
+    NvU32 util, vgpuScale, procId, subProcId;
+    char  subProcName[100];
+    NvU32 _pad;
+    NvU64 pOsPidInfo;
+} nv_engine_sample_t;
+
+typedef struct {
+    NvU64 ts;
+    nv_engine_sample_t fb, gr, nvenc, nvdec, nvjpg, nvofa;
+} nv_perfmon_sample_t;
+
+#define NV_GPUMON_N 72u
+typedef struct {
+    uint8_t type;
+    uint8_t _p[3];
+    NvU32 bufSize, count, tracker;
+    nv_perfmon_sample_t s[NV_GPUMON_N];
+} nv_gpumon_v2_t;
+
+int nvfan_read_extended(nvfan_extended_t *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    out->vramUsedMB = out->vramTotalMB = -1;
+    out->utilGE = out->utilFB = out->utilNVENC = out->utilNVDEC = -1;
+    out->gpuClockMHz = out->memClockMHz = -1;
+
+    if (nv_open_one(0, &gCtl) != 0) return -1;
+    NvHandle hClient = 0, hDevice = 0;
+    NvHandle hSub = rm_bringup(&hClient, &hDevice, NULL);
+    if (!hSub) {
+        nv_close_all();
+        return -1;
+    }
+
+    /* VRAM used/total (KB -> MiB). */
+    {
+        nv_fb_info_v2_t f; memset(&f, 0, sizeof f);
+        f.n = 2;
+        f.e[0].index = NV2080_CTRL_FB_INFO_INDEX_TOTAL_RAM_SIZE;
+        f.e[1].index = NV2080_CTRL_FB_INFO_INDEX_HEAP_FREE;
+        if (rm_control(hClient, hSub, NV2080_CTRL_CMD_FB_GET_INFO_V2,
+                       &f, sizeof f) == 0) {
+            NvU32 totalKB = f.e[0].data, freeKB = f.e[1].data;
+            if (totalKB != 0 && totalKB != NV_FB_INFO_UNUSED &&
+                freeKB != NV_FB_INFO_UNUSED && freeKB <= totalKB) {
+                out->vramTotalMB = (int32_t)(totalKB / 1024u);
+                out->vramUsedMB  = (int32_t)((totalKB - freeKB) / 1024u);
+            }
+        }
+    }
+
+    /* Per-engine utilization (basis points -> %). Latest sample wins. */
+    {
+        nv_gpumon_v2_t *g = calloc(1, sizeof *g);
+        if (g) {
+            g->type = 2; /* PERFMON_UTIL */
+            g->bufSize = (NvU32)sizeof g->s;
+            if (rm_control(hClient, hSub, NV2080_CTRL_CMD_PERF_GET_GPUMON_UTIL_V2,
+                           g, sizeof *g) == 0) {
+                const nv_perfmon_sample_t *best = NULL;
+                for (unsigned i = 0; i < NV_GPUMON_N; i++) {
+                    if (g->s[i].ts == 0) continue;
+                    if (!best || g->s[i].ts > best->ts) best = &g->s[i];
+                }
+                if (best) {
+                    out->utilGE    = (int32_t)(best->gr.util / 100u);
+                    out->utilFB    = (int32_t)(best->fb.util / 100u);
+                    out->utilNVENC = (int32_t)(best->nvenc.util / 100u);
+                    out->utilNVDEC = (int32_t)(best->nvdec.util / 100u);
+                }
+            }
+            free(g);
+        }
+    }
+
+    /* Clocks (KHz -> MHz, 0xFFFFFFFF = unavailable). */
+    {
+        nv_clk_pmu_t *cp = calloc(1, sizeof *cp);
+        if (cp) {
+            cp->mode = 1; /* LATEST_SAMPLE_ONLY */
+            if (rm_control(hClient, hSub,
+                           NV2080_CTRL_CMD_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES,
+                           cp, sizeof *cp) == 0 &&
+                cp->num > 0 && cp->num <= NV_CLK_PMU_N) {
+                const nv_clk_sample_t *s = &cp->s[cp->num - 1];
+                if (s->gpcKHz != NV_FB_INFO_UNUSED)
+                    out->gpuClockMHz = (int32_t)(s->gpcKHz / 1000u);
+                if (s->dramKHz != NV_FB_INFO_UNUSED)
+                    out->memClockMHz = (int32_t)(s->dramKHz / 1000u);
+            }
+            free(cp);
+        }
+    }
+
+    nv_close_all();
+    return 0;
+}
+
 int nvfan_read_status(nvfan_status_t *status)
 {
     if (!status) return -1;
