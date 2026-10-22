@@ -86,7 +86,7 @@ and loaded on the next launch. All boxes are off by default.
 
 ## Caution
 - The NVIDIAPowerGadget app has only been tested on a dual-fan Gigabyte RTX 3060 Ti
-  with NullMoth drivers based on NVIDIA OGKM 610.57.04.
+  with NullMoth drivers based on NVIDIA OGKM 615.78.08.
   Compatibility with other hardware is not guaranteed.
 
 ## License

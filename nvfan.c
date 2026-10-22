@@ -97,13 +97,13 @@ typedef uint32_t NvHandle; typedef uint64_t NvP64;
 #define RUSD_SEQ_START              (0xFF00000000000000ULL)
 
 /*
- * RUSD offsets in NV00DE_SHARED_DATA for the RM the kext runs (610.57.04).
+ * RUSD offsets in NV00DE_SHARED_DATA for the RM the kext runs (615.78.08).
  * Verified with offsetof() against r610 class/cl00de.h AND with live data
  * (0 -> 820 -> 1850 RPM ramp observed on RTX 3060 Ti).
  * Newer trees move theseoffsets, so always re-verify with offsetof()
  * after any version change.
  */
-#define RUSD_FAN_STATUS_OFFSET  2552u
+#define RUSD_FAN_STATUS_OFFSET  2584u
 #define RUSD_TEMPS_OFFSET       2312u
 #define RUSD_UTIL_OFFSET        1992u
 
